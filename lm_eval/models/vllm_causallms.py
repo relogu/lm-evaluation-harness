@@ -543,12 +543,18 @@ class VLLM(TemplateLM):
                         if proc.is_alive():
                             proc.kill()
 
-        else:
+        if self.lora_request is not None:
             outputs = self.model.generate(
                 [TokensPrompt(prompt_token_ids=request) for request in requests],
                 sampling_params=sampling_params,
                 use_tqdm=self.batch_size == "auto",
                 lora_request=self.lora_request,
+            )
+        else:
+            outputs = self.model.generate(
+                [TokensPrompt(prompt_token_ids=request) for request in requests],
+                sampling_params=sampling_params,
+                use_tqdm=self.batch_size == "auto",
             )
             return outputs
 
