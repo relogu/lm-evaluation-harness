@@ -16,6 +16,7 @@ from lm_eval.utils import (
     get_rolling_token_windows,
     make_disjoint_window,
 )
+from vllm import TokensPrompt
 
 
 try:
@@ -249,7 +250,7 @@ class VLLM(TemplateLM):
             ):
                 llm = LLM(**model_args)
                 return llm.generate(
-                    prompt_token_ids=requests, sampling_params=sampling_params
+                    [TokensPrompt(prompt_token_ids=r) for r in requests], sampling_params=sampling_params
                 )
 
             # dispatch requests to all self.data_parallel_size workers, in interleaved fashion
@@ -265,14 +266,14 @@ class VLLM(TemplateLM):
 
         if self.lora_request is not None:
             outputs = self.model.generate(
-                prompt_token_ids=requests,
+                [TokensPrompt(prompt_token_ids=r) for r in requests],
                 sampling_params=sampling_params,
                 use_tqdm=True if self.batch_size == "auto" else False,
                 lora_request=self.lora_request,
             )
         else:
             outputs = self.model.generate(
-                prompt_token_ids=requests,
+                [TokensPrompt(prompt_token_ids=r) for r in requests],
                 sampling_params=sampling_params,
                 use_tqdm=True if self.batch_size == "auto" else False,
             )
