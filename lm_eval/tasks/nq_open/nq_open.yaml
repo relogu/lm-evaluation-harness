@@ -1,5 +1,5 @@
 task: nq_open
-dataset_path: nq_open
+dataset_path: google-research-datasets/nq_open
 output_type: generate_until
 training_split: train
 validation_split: validation
@@ -29,4 +29,4 @@ metric_list:
     regexes_to_ignore:
     - "\\b(?:The |the |An |A |The |a |an )"
 metadata:
-  version: 3.0
+  version: 4.0
