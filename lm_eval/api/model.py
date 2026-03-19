@@ -3,16 +3,21 @@ import hashlib
 import json
 import logging
 import os
-from typing import Dict, List, Optional, Tuple, Type, TypeVar
+from collections.abc import Iterable
+from typing import TYPE_CHECKING, Any, Optional, TypeVar
 
-import transformers
-from sqlitedict import SqliteDict
 from tqdm import tqdm
 
 from lm_eval import utils
 
 
-eval_logger = logging.getLogger("lm-eval")
+if TYPE_CHECKING:
+    from sqlitedict import SqliteDict
+
+    from lm_eval.api.instance import Instance
+
+
+eval_logger = logging.getLogger(__name__)
 
 T = TypeVar("T", bound="LM")
 
@@ -27,10 +32,10 @@ class LM(abc.ABC):
         # set rank and world size to a single process, by default.
         self._rank = 0
         self._world_size = 1
-        self.cache_hook = CacheHook(None)
+        self.cache_hook: CacheHook = CacheHook(None)
 
     @abc.abstractmethod
-    def loglikelihood(self, requests) -> List[Tuple[float, bool]]:
+    def loglikelihood(self, requests) -> list[tuple[float, bool]]:
         """Compute log-likelihood of generating a continuation from a context.
         Downstream tasks should attempt to use loglikelihood instead of other
         LM calls whenever possible.
@@ -55,7 +60,7 @@ class LM(abc.ABC):
         pass
 
     @abc.abstractmethod
-    def loglikelihood_rolling(self, requests) -> List[Tuple[float]]:
+    def loglikelihood_rolling(self, requests) -> list[float]:
         """Compute full log-likelihood of a string, with no truncation, for perplexity computation
         - We will use the full max context length of the model.
         - For inputs that exceed the max context length, we divide the tokenized string into chunks of up to
@@ -64,7 +69,8 @@ class LM(abc.ABC):
           which may simply concatenate multiple documents together.
         - IMPORTANT: We maximize the amount of context for each prediction. Specifically, for inputs that we break into
           multiple chunks, the last input will still a full-sized context.
-          Example:
+
+        Example:
             Input tokens: [ 0 1 2 3 4 5 6 7 8 9 ]
             Prefix: BOS/EOS
             Max context length: 4
@@ -97,30 +103,33 @@ class LM(abc.ABC):
 
     # TODO: Add an optional max length
     @abc.abstractmethod
-    def generate_until(self, requests) -> List[str]:
+    def generate_until(self, requests) -> list[str]:
         """Generate greedily until a stopping sequence
 
         :param requests: list[Instance]
-            A list of Instance objects with property `args` which returns a tuple (context, until).
+            A list of Instance objects with property `args` which returns a tuple (context, gen_kwargs).
             context: str
                 Context string
-            until: [str]
-                The string sequences to generate until. These string sequences
-                may each span across multiple tokens, or may be part of one token.
+            gen_kwargs: dict
+                A dictionary of keyword arguments to pass to the generation function e.g. top_k, until, etc.
         :return: list[str]
-            A list of strings continuation
+            A list of model generated continuations.
             continuation: str
                 The generated continuation.
         """
         pass
 
-    def apply_chat_template(self, chat_history: List[Dict[str, str]]) -> str:
+    def apply_chat_template(
+        self, chat_history: list[dict[str, str]], add_generation_prompt=True
+    ) -> str:
         """
         Defines how to transform few-shot examples provided as chat history into a format that can be used as input to the LM.
 
         :param chat_history: list[dict[str, str]]
             A list of dictionaries with keys 'role' and 'content'.
             Values are strings representing the role name and the content of the message, respectively.
+        :param add_generation_prompt: bool
+            Whether to append an assistant gen prefix (for e.g. <|assistant|>) to the assistant messages in the chat history. False if prefilling an assistant message.
         :return: str
             A string representing the chat history in a format that can be used as input to the LM.
         """
@@ -130,7 +139,7 @@ class LM(abc.ABC):
 
     @classmethod
     def create_from_arg_string(
-        cls: Type[T], arg_string: str, additional_config: Optional[dict] = None
+        cls: type[T], arg_string: str, additional_config: dict | None = None
     ) -> T:
         """
         Creates an instance of the LM class using the given argument string and additional config.
@@ -149,7 +158,7 @@ class LM(abc.ABC):
 
     @classmethod
     def create_from_arg_obj(
-        cls: Type[T], arg_dict: dict, additional_config: Optional[dict] = None
+        cls: type[T], arg_dict: dict, additional_config: dict | None = None
     ) -> T:
         """
         Creates an instance of the LM class using the given arg_obj
@@ -162,10 +171,11 @@ class LM(abc.ABC):
         - Instance of the LM class.
         """
 
-        additional_config = {} if additional_config is None else additional_config
-        additional_config = {
-            k: v for k, v in additional_config.items() if v is not None
-        }
+        additional_config = (
+            {}
+            if additional_config is None
+            else {k: v for k, v in additional_config.items() if v is not None}
+        )
 
         return cls(**arg_dict, **additional_config)
 
@@ -193,35 +203,33 @@ class LM(abc.ABC):
             "To use this model with chat templates, please implement the 'tokenizer_name' property."
         )
 
-    @property
-    def chat_template(self) -> str:
-        """Must be defined for LM subclasses that implement Chat Templating.
-        Should return the structure of the chat template applied to user/assistant messages.
-        This is used only to save in the experiment results for reproducibility.
+    def chat_template(self, chat_template: bool | str = False) -> str | None:
+        """Returns the chat template structure for user/assistant messages if a template is provided.
+        This method is intended to be overridden in a subclass to define a specific chat template format.
+        For models that do not support chat templates, this method returns None by default.
         """
-        raise NotImplementedError(
-            "To use this model with chat templates, please implement the 'chat_template' property."
-        )
 
-    def set_cache_hook(self, cache_hook) -> None:
+        return ""
+
+    def set_cache_hook(self, cache_hook: "CacheHook") -> None:
         self.cache_hook = cache_hook
 
 
 ### SQLite-based caching of LM responses
-def hash_args(attr, args):
+def hash_args(attr: str, args: Iterable[Any]) -> str:
     dat = json.dumps([attr] + list(args))
     return hashlib.sha256(dat.encode("utf-8")).hexdigest()
 
 
 class CacheHook:
-    def __init__(self, cachinglm) -> None:
+    def __init__(self, cachinglm: Optional["CachingLM"]) -> None:
         if cachinglm is None:
-            self.dbdict = None
+            self.dbdict: SqliteDict | None = None
             return
 
         self.dbdict = cachinglm.dbdict
 
-    def add_partial(self, attr, req, res) -> None:
+    def add_partial(self, attr: str, req: Iterable[Any], res: Any) -> None:
         if self.dbdict is None:
             return
         hsh = hash_args(attr, req)
@@ -229,7 +237,7 @@ class CacheHook:
 
 
 class CachingLM:
-    def __init__(self, lm, cache_db) -> None:
+    def __init__(self, lm: LM, cache_db: str) -> None:
         """LM wrapper that returns cached results if they exist, and uses the underlying LM if not.
 
         :param lm: LM
@@ -237,8 +245,10 @@ class CachingLM:
         :param cache_db: str
             Path to cache db
         """
-        self.lm = lm
-        self.cache_db = cache_db
+        from sqlitedict import SqliteDict
+
+        self.lm: LM = lm
+        self.cache_db: str = cache_db
         if os.path.dirname(cache_db):
             os.makedirs(os.path.dirname(cache_db), exist_ok=True)
         self.dbdict = SqliteDict(cache_db, autocommit=True)
@@ -246,13 +256,13 @@ class CachingLM:
         # add hook to lm
         lm.set_cache_hook(self.get_cache_hook())
 
-    def __getattr__(self, attr: str):
+    def __getattr__(self, attr: str) -> Any:
         lm_attr = getattr(self.lm, attr)
         if attr not in ["loglikelihood", "loglikelihood_rolling", "generate_until"]:
             eval_logger.debug(f"Passing through attribute '{attr}' to underlying LM")
             return lm_attr
 
-        def fn(requests):
+        def _fn(requests: list["Instance"]) -> list["Instance"]:
             res = []
             remaining_reqs = []
             warned = False
@@ -285,11 +295,11 @@ class CachingLM:
                 f"Cached requests: {len(requests) - len(remaining_reqs)}, Requests remaining: {len(remaining_reqs)}"
             )
             # actually run the LM on the requests that do not have cached results
-            rem_res = getattr(self.lm, attr)(remaining_reqs)
+            rem_res = getattr(self.lm, attr)(remaining_reqs) if remaining_reqs else []
 
             # stick the new ones back into the list and also cache any of the new ones
             resptr = 0
-            for req, r in zip(remaining_reqs, rem_res):
+            for req, r in zip(remaining_reqs, rem_res, strict=True):
                 while res[resptr] is not None:
                     resptr += 1
 
@@ -302,9 +312,9 @@ class CachingLM:
 
             return res
 
-        return fn
+        return _fn
 
-    def get_cache_hook(self):
+    def get_cache_hook(self) -> "CacheHook":
         return CacheHook(self)
 
 
@@ -314,9 +324,12 @@ class TemplateLM(LM):
     and boilerplate often included in other LM subclasses.
     """
 
+    tokenizer = None
+    backend = "causal"
+
     @property
     @abc.abstractmethod
-    def eot_token_id(self):
+    def eot_token_id(self) -> int:
         pass
 
     @property
@@ -325,44 +338,112 @@ class TemplateLM(LM):
         return self.eot_token_id
 
     @abc.abstractmethod
-    def tok_encode(self, string: str, **kwargs):
+    def tok_encode(
+        self, string: str, add_special_tokens: bool | None = None, **kwargs
+    ) -> list[int]:
+        """
+        Tokenize a string using the model's tokenizer and return a list of token IDs.
+        NOTE: This method is expected to handle strings which already contain the BOS token (when add_special_tokens=None).
+        Otherwise, will use add_special_tokens if specified.
+        """
         pass
 
     @abc.abstractmethod
-    def _loglikelihood_tokens(self, requests, **kwargs):
+    def _loglikelihood_tokens(
+        self, requests: list[tuple[tuple[str, str], list[int], list[int]]], **kwargs
+    ) -> list[tuple[float, bool]]:
         pass
 
-    def _encode_pair(self, context, continuation):
+    def _encode_pair(
+        self, context: str, continuation: str
+    ) -> tuple[list[int], list[int]]:
+        """
+        Encode a context-continuation pair into separate token ID lists.
+
+        This method handles the tokenization of context and continuation strings while
+        preserving proper boundary handling. Trailing spaces in the context are moved
+        to the beginning of the continuation to ensure correct tokenization at the
+        word boundary.
+
+        For Seq2Seq models (encoder-decoder), context and continuation are encoded
+        separately. For other model types (decoder-only), the full sequence is encoded
+        together to ensure proper tokenization, then split at the context boundary.
+
+        :param context: str
+            The context string. Can be empty (will be handled by the caller).
+        :param continuation: str
+            The continuation string to be scored.
+
+        :return: tuple[list[int], list[int]]
+            A tuple of (context_enc, continuation_enc) where:
+            - context_enc: Token IDs for the context
+            - continuation_enc: Token IDs for the continuation
+
+        Note:
+            This method does NOT handle empty context. The caller should
+            handle empty context (see loglikelihood method).
+        """
+        assert context, "Context cannot be empty!"
+
         n_spaces = len(context) - len(context.rstrip())
         if n_spaces > 0:
             continuation = context[-n_spaces:] + continuation
             context = context[:-n_spaces]
 
-        model_class = getattr(self, "AUTO_MODEL_CLASS", None)
-
-        if model_class == transformers.AutoModelForSeq2SeqLM:
-            context_enc = self.tok_encode(context)
-            continuation_enc = self.tok_encode(continuation, add_special_tokens=False)
-        else:
+        if self.backend == "causal":
             whole_enc = self.tok_encode(context + continuation)
             context_enc = self.tok_encode(context)
 
             context_enc_len = len(context_enc)
             continuation_enc = whole_enc[context_enc_len:]
+        else:
+            # for SEQ2SEQ case we need to encode separately
+            context_enc = self.tok_encode(context)
+            continuation_enc = self.tok_encode(continuation, add_special_tokens=False)
 
         return context_enc, continuation_enc
 
     def loglikelihood(
-        self, requests, disable_tqdm: bool = False
-    ) -> List[Tuple[float, bool]]:
+        self, requests: list["Instance"], disable_tqdm: bool = False
+    ) -> list[tuple[float, bool]]:
+        """
+        Compute log-likelihood of generating continuations from contexts.
+
+        This is the concrete implementation for TemplateLM and its subclasses.
+        It tokenizes context-continuation pairs and delegates scoring to
+        _loglikelihood_tokens.
+
+        **IMPORTANT**: This method is expected to handle empty context strings.
+        When context is empty (""), it uses the model's prefix_token_id (typically
+        BOS or EOS token) as context. If the continuation already starts with the
+        prefix token, it reuses that token as context instead of duplicating it.
+
+        :param requests: list[Instance]
+            List of Instance objects with property `args` returning (context, continuation) tuples.
+        :param disable_tqdm: bool
+            Whether to disable the progress bar in _loglikelihood_tokens.
+
+        :return: list[tuple[float, bool]]
+            List of (log_prob, is_greedy) tuples for each request.
+
+        Implementation details:
+            - Empty context: Uses prefix_token_id (BOS/EOS) as context
+            - Non-empty context: Uses _encode_pair for proper tokenization
+            - Avoids token duplication when continuation starts with prefix_token_id
+        """
         new_reqs = []
         for context, continuation in [req.args for req in requests]:
             if context == "":
-                # BOS or EOS as context
-                context_enc, continuation_enc = (
-                    [self.prefix_token_id],
-                    self.tok_encode(continuation),
+                continuation_enc = self.tok_encode(
+                    continuation, add_special_tokens=False
                 )
+                # BOS or EOS as context: handle when context is empty -> (context + continuation) -> (BOS + continuation
+                context_enc, continuation_enc = (
+                    ([self.prefix_token_id], continuation_enc)
+                    if self.prefix_token_id != continuation_enc[0]
+                    else (continuation_enc[:1], continuation_enc[1:])
+                )
+                # BOS or EOS as context
             else:
                 context_enc, continuation_enc = self._encode_pair(context, continuation)
 
@@ -373,9 +454,110 @@ class TemplateLM(LM):
     @abc.abstractmethod
     def loglikelihood_rolling(
         self, requests, disable_tqdm: bool = False
-    ) -> List[Tuple[float, bool]]:
+    ) -> list[float]:
         pass
 
     @abc.abstractmethod
-    def generate_until(self, requests, disable_tqdm: bool = False) -> List[str]:
+    def generate_until(self, requests, disable_tqdm: bool = False) -> list[str]:
         pass
+
+    def chat_template(self, chat_template: bool | str = False) -> str | None:
+        """
+        Set and get the appropriate chat template for the model.
+        This method sets the tokenizer's chat_template and returns the template string for reproducibility.
+
+        The template selection logic is adapted from the Transformers library's `apply_chat_template`
+        method in the Tokenizer class. The original implementation can be found at:
+        https://github.com/huggingface/transformers/blob/fc35907f95459d7a6c5281dfadd680b6f7b620e3/src/transformers/tokenization_utils_base.py#L1687
+
+        This method ensures that the right template is chosen based on the following:
+        0. If the model has no 'tokenizer' attribute: assumes that there is only a single possible chat template, handled on the model provider side internally. Returns the empty string.
+        1. If the model's tokenizer has multiple templates:
+            a. Use the specified template if it exists in the dictionary.
+            b. Use the default template from the list if no specific template is provided.
+            c. Raise an error if no default template exists and no specific template is provided.
+        2. If the model's tokenizer has a single template or no template:
+            a. Use the tokenizer's chat template if available.
+            b. Fall back to the default chat template if no tokenizer chat template exists.
+
+        Args:
+            chat_template (Union[bool, str]): Specifies the chat template to use.
+                - If False or None, no template is applied.
+                - If True, the default or only available template is used.
+                - If a string, the template with the matching name is used.
+
+        Returns:
+            Optional[str]: The selected chat template, or None if no template is applied.
+        """
+        if self.tokenizer is None:
+            return ""
+
+        if chat_template is False or chat_template is None:
+            eval_logger.warning(
+                "model.chat_template was called with the chat_template set to False or None. "
+                "Therefore no chat template will be applied. Make sure this is an intended behavior."
+            )
+            return None
+
+        # Convert boolean chat_template to None to ensure compatibility with the adapted logic
+        if isinstance(chat_template, bool):
+            chat_template = None
+        using_default_template = False
+
+        # First, handle the cases when the model has a dict of multiple templates
+        try:
+            template = (
+                self.tokenizer.chat_template or self.tokenizer.default_chat_template
+            )
+        except AttributeError:
+            return None
+
+        if isinstance(template, dict):
+            using_default_dict = self.tokenizer.chat_template is None
+
+            if chat_template is not None:
+                if chat_template in template:
+                    selected_template = template[chat_template]
+                    if using_default_dict:
+                        using_default_template = True
+                else:
+                    raise ValueError(
+                        f"The specified chat template '{chat_template}' is not available. "
+                        f"Available template names are {sorted(template.keys())}."
+                    )
+            else:
+                # If user didn't pass a chat template, use the default template from the dict
+                if "default" in template:
+                    selected_template = template["default"]
+                    using_default_template = True
+                else:
+                    raise ValueError(
+                        "This model has multiple chat templates with no default specified! Please either pass a chat "
+                        "template or the name of the template you wish to use to the `chat_template` argument. Available "
+                        f"template names are {sorted(template.keys())}."
+                    )
+
+        # Cases when the model has a single template or no template
+        else:
+            # priority: `chat_template` argument > `tokenizer.chat_template` > `tokenizer.default_chat_template
+            if isinstance(chat_template, str):
+                eval_logger.warning(
+                    "Chat template name provided, but the tokenizer's chat template is not a dictionary. "
+                    "Using the tokenizer's chat template or the default template instead."
+                )
+            if self.tokenizer.chat_template is not None:
+                selected_template = self.tokenizer.chat_template
+            else:
+                selected_template = self.tokenizer.default_chat_template
+                using_default_template = True
+
+        if using_default_template:
+            eval_logger.warning(
+                "No chat template is set for this tokenizer, falling back to a default class-level template. This is "
+                "very error-prone, because models are often trained with templates different from the class default! "
+                "Default chat templates are a legacy feature and will be removed in Transformers v4.43, at which "
+                "point any code depending on them will stop working. We recommend setting a valid chat template before "
+                "then to ensure that this model continues working without issues."
+            )
+
+        return selected_template
