@@ -316,6 +316,39 @@ class VLLM(TemplateLM):
     def max_gen_toks(self):
         return self._max_gen_toks
 
+    def _special_stop_token_ids(self, stop: list[str] | None) -> list[int]:
+        if not stop:
+            return []
+
+        special_tokens = set(getattr(self.tokenizer, "all_special_tokens", []) or [])
+        stop_token_ids: list[int] = []
+        for term in stop:
+            if not term or term not in special_tokens:
+                continue
+            token_ids = self.tokenizer(term, add_special_tokens=False).input_ids
+            if len(token_ids) == 1:
+                stop_token_ids.append(int(token_ids[0]))
+
+        return sorted(set(stop_token_ids))
+
+    @staticmethod
+    def _merge_stop_token_ids(
+        kwargs: dict[str, Any], stop_token_ids: list[int]
+    ) -> dict[str, Any]:
+        if not stop_token_ids:
+            return kwargs
+
+        existing = kwargs.get("stop_token_ids")
+        if existing is None:
+            merged = stop_token_ids
+        elif isinstance(existing, int):
+            merged = [existing, *stop_token_ids]
+        else:
+            merged = [*existing, *stop_token_ids]
+
+        kwargs["stop_token_ids"] = sorted({int(token_id) for token_id in merged})
+        return kwargs
+
     def apply_chat_template(
         self, chat_history: list[dict[str, str]], add_generation_prompt: bool = True
     ) -> str:
@@ -679,6 +712,9 @@ class VLLM(TemplateLM):
 
                 kwargs, until, max_gen_toks = self.modify_gen_kwargs(
                     gen_kwargs, eos=eos, default_max_gen_toks=self.max_gen_toks
+                )
+                kwargs = self._merge_stop_token_ids(
+                    kwargs, self._special_stop_token_ids(until)
                 )
 
                 # set the max length in tokens of inputs ("context_enc")
