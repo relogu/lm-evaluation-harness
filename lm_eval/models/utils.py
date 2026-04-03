@@ -36,6 +36,7 @@ class GenKwargs(TypedDict, total=False):
     # other alias' will be converted to `max_gen_toks`.
     max_gen_toks: int
     until: list[str]
+    stop_sequences: list[str]
     __extra_items__: Any
 
 
@@ -630,6 +631,7 @@ def normalize_gen_kwargs(
         gen_kwargs: Raw generation kwargs from the request. Expected keys include:
             - do_sample: Whether to use sampling (vs greedy decoding) - Required
             - until (str | list[str]): Stop sequence(s) for generation.
+            - stop_sequences (str | list[str]): Alias for until used by oe-eval task configs.
             - max_gen_toks | max_new_tokens | max_tokens | max_completion_tokens: Maximum tokens to generate
             - temperature: Sampling temperature
             - Other backend-specific kwargs
@@ -657,6 +659,28 @@ def normalize_gen_kwargs(
     import copy
 
     kwargs = copy.deepcopy(gen_kwargs)
+
+    # oe-eval task configs often store stop strings under `stop_sequences`
+    # while lm-eval model wrappers consume `until`.
+    if "stop_sequences" in kwargs:
+        raw_until = kwargs.get("until")
+        raw_stop_sequences = kwargs.pop("stop_sequences")
+
+        combined: list[str] = []
+        for value in (raw_until, raw_stop_sequences):
+            if value is None:
+                continue
+            if isinstance(value, str):
+                combined.append(value)
+            elif isinstance(value, list):
+                combined.extend(value)
+            else:
+                raise ValueError(
+                    "Expected stop sequence config to be a string or list of strings "
+                    f"but got {value!r}"
+                )
+
+        kwargs["until"] = combined
 
     until = kwargs.get("until", [])
     if not isinstance(until, list):

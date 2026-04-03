@@ -320,10 +320,9 @@ class VLLM(TemplateLM):
         if not stop:
             return []
 
-        special_tokens = set(getattr(self.tokenizer, "all_special_tokens", []) or [])
         stop_token_ids: list[int] = []
         for term in stop:
-            if not term or term not in special_tokens:
+            if not term:
                 continue
             token_ids = self.tokenizer(term, add_special_tokens=False).input_ids
             if len(token_ids) == 1:

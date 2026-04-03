@@ -1,6 +1,7 @@
 import pytest
 
 from lm_eval.models.utils import maybe_truncate, normalize_gen_kwargs, truncate_tokens
+from lm_eval.models.vllm_causallms import VLLM
 
 
 class TestTruncateTokens:
@@ -197,6 +198,21 @@ class TestNormalizeGenKwargs:
         result = normalize_gen_kwargs({})
         assert result["until"] == []
 
+    def test_stop_sequences_alias_populates_until(self):
+        result = normalize_gen_kwargs({"stop_sequences": "<|im_end|>"})
+        assert result["until"] == ["<|im_end|>"]
+        assert "stop_sequences" not in result
+
+    def test_stop_sequences_alias_merges_with_until(self):
+        result = normalize_gen_kwargs(
+            {
+                "until": ["<|endoftext|>"],
+                "stop_sequences": ["<|im_end|>"],
+            }
+        )
+        assert result["until"] == ["<|endoftext|>", "<|im_end|>"]
+        assert "stop_sequences" not in result
+
     # --- max token aliases ---
 
     def test_max_gen_toks_used_directly(self):
@@ -242,6 +258,23 @@ class TestNormalizeGenKwargs:
             }
         )
         assert result["max_gen_toks"] == 200
+
+
+class TestVllmStopTokenIds:
+    def test_single_token_stop_string_not_in_all_special_tokens_is_kept(self):
+        class DummyTokenizer:
+            all_special_tokens = ["<|endoftext|>"]
+
+            def __call__(self, text, add_special_tokens=False):
+                mapping = {
+                    "<|im_end|>": [100265],
+                    "<|endoftext|>": [100257],
+                }
+                return type("Encoded", (), {"input_ids": mapping[text]})()
+
+        dummy = type("DummyModel", (), {"tokenizer": DummyTokenizer()})()
+        result = VLLM._special_stop_token_ids(dummy, ["<|im_end|>", "<|endoftext|>"])
+        assert result == [100257, 100265]
 
     def test_max_token_priority_max_tokens_third(self):
         result = normalize_gen_kwargs(
