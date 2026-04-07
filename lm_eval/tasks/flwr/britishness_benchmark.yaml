@@ -1,0 +1,28 @@
+task: flwr/britishness_benchmark
+tag:
+  - flwr
+dataset_path: flwrlabs/britishness-benchmark
+dataset_kwargs:
+  revision: 4156f07b6fd4c733e509e41a51b9004e1e759479
+training_split: null
+validation_split: validation
+test_split: test
+fewshot_split: dev
+output_type: multiple_choice
+# Dataset schema at the pinned revision:
+# - question: str
+# - choices: list[str] with 4 options
+# - answer: zero-based gold index
+# - answer_letter / answer_text: redundant answer metadata
+doc_to_text: "Question: {{question}}\nAnswer:"
+doc_to_choice: choices
+doc_to_target: answer
+metric_list:
+  - metric: acc
+    aggregation: mean
+    higher_is_better: true
+  - metric: acc_norm
+    aggregation: mean
+    higher_is_better: true
+metadata:
+  version: 1.0
